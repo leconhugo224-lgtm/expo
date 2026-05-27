@@ -1,32 +1,291 @@
----
-title: Set up your environment
-description: Learn how to set up your development environment to start building with Expo.
-hideTOC: true
-searchRank: 3
----
+from flask import Flask, request, redirect, render_template_string
+from flask_sqlalchemy import SQLAlchemy
+import stripe
+import requests
+from bs4 import BeautifulSoup
+import ollama
 
-import { DevelopmentEnvironmentInstructions } from '~/scenes/get-started/set-up-your-environment/DevelopmentEnvironmentInstructions';
-import { DevelopmentModeForm } from '~/scenes/get-started/set-up-your-environment/DevelopmentModeForm';
-import { PlatformAndDeviceForm } from '~/scenes/get-started/set-up-your-environment/PlatformAndDeviceForm';
+# ====================================================
+# CONFIG
+# ====================================================
 
-Let's set up a local development environment for running your project on Android and iOS.
+app = Flask(__name__)
 
-## Where would you like to develop?
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///shop.db"
 
-We recommend using a real device to develop, since you'll get to see exactly what your users will see.
+db = SQLAlchemy(app)
 
-<PlatformAndDeviceForm />
+# STRIPE
+stripe.api_key = "TA_CLE_STRIPE"
 
-## How would you like to develop?
+# ====================================================
+# DATABASE
+# ====================================================
 
-Expo Go is a playground for students and learners to try Expo quickly. A development build is a build of your own app that includes Expo's developer tools.
+class Product(db.Model):
 
-<DevelopmentModeForm />
+    id = db.Column(db.Integer, primary_key=True)
 
----
+    name = db.Column(db.String(200))
 
-<DevelopmentEnvironmentInstructions />
+    description = db.Column(db.Text)
 
-## Next step
+    price = db.Column(db.Float)
 
-You have a project and a development environment. Now it's time to start developing.
+    image = db.Column(db.String(1000))
+
+    supplier_url = db.Column(db.String(1000))
+
+# ====================================================
+# AI DESCRIPTION
+# ====================================================
+
+def generate_description(product_name):
+
+    prompt = f"""
+Crée une fiche produit ecommerce optimisée SEO.
+
+Produit :
+{product_name}
+
+Ajoute :
+- titre vendeur
+- bénéfices
+- description persuasive
+"""
+
+    response = ollama.chat(
+
+        model="llama3",
+
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    return response["message"]["content"]
+
+# ====================================================
+# IMPORT PRODUIT URL
+# ====================================================
+
+def import_product(url):
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    html = requests.get(
+        url,
+        headers=headers
+    ).text
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = soup.title.text[:100]
+
+    image = ""
+
+    for img in soup.find_all("img"):
+
+        src = img.get("src")
+
+        if src and "http" in src:
+
+            image = src
+            break
+
+    description = generate_description(title)
+
+    product = Product(
+
+        name=title,
+
+        description=description,
+
+        price=49.99,
+
+        image=image,
+
+        supplier_url=url
+    )
+
+    db.session.add(product)
+
+    db.session.commit()
+
+# ====================================================
+# IA DROPSHIPPING AGENT
+# ====================================================
+
+def supplier_agent(product):
+
+    print("\n===================")
+    print("AI AGENT STARTED")
+    print("===================\n")
+
+    print("Produit :", product.name)
+
+    print("Commande fournisseur préparée")
+
+    print("URL fournisseur :")
+
+    print(product.supplier_url)
+
+    print("\nIci tu connecteras :")
+    print("- API CJ Dropshipping")
+    print("- API Zendrop")
+    print("- API fournisseur")
+
+# ====================================================
+# HOME
+# ====================================================
+
+@app.route("/")
+def home():
+
+    products = Product.query.all()
+
+    return render_template_string("""
+
+    <h1>🛒 AI SHOP</h1>
+
+    <a href="/add">
+    Ajouter Produit
+    </a>
+
+    <hr>
+
+    {% for product in products %}
+
+        <div style="
+        border:1px solid black;
+        padding:20px;
+        margin:20px;
+        width:300px;
+        ">
+
+            <img src="{{ product.image }}"
+            width="250">
+
+            <h2>{{ product.name }}</h2>
+
+            <p>{{ product.description }}</p>
+
+            <h3>{{ product.price }} €</h3>
+
+            <a href="/buy/{{ product.id }}">
+                <button>Acheter</button>
+            </a>
+
+        </div>
+
+    {% endfor %}
+
+    """, products=products)
+
+# ====================================================
+# AJOUT PRODUIT
+# ====================================================
+
+@app.route("/add", methods=["GET", "POST"])
+def add():
+
+    if request.method == "POST":
+
+        url = request.form["url"]
+
+        import_product(url)
+
+        return redirect("/")
+
+    return """
+
+    <h1>Importer Produit</h1>
+
+    <form method="POST">
+
+        <input
+        name="url"
+        placeholder="URL fournisseur">
+
+        <button>Importer</button>
+
+    </form>
+    """
+
+# ====================================================
+# PAIEMENT
+# ====================================================
+
+@app.route("/buy/<int:id>")
+def buy(id):
+
+    product = Product.query.get(id)
+
+    session = stripe.checkout.Session.create(
+
+        payment_method_types=["card"],
+
+        line_items=[{
+
+            "price_data": {
+
+                "currency": "eur",
+
+                "product_data": {
+                    "name": product.name
+                },
+
+                "unit_amount": int(
+                    product.price * 100
+                ),
+            },
+
+            "quantity": 1,
+        }],
+
+        mode="payment",
+
+        success_url=f"http://localhost:5000/success/{id}",
+
+        cancel_url="http://localhost:5000",
+    )
+
+    return redirect(session.url)
+
+# ====================================================
+# SUCCESS
+# ====================================================
+
+@app.route("/success/<int:id>")
+def success(id):
+
+    product = Product.query.get(id)
+
+    # AGENT IA
+    supplier_agent(product)
+
+    return f"""
+
+    <h1>✅ Paiement réussi</h1>
+
+    <h2>Commande fournisseur préparée</h2>
+
+    <p>{product.name}</p>
+    """
+
+# ====================================================
+# START
+# ====================================================
+
+with app.app_context():
+
+    db.create_all()
+
+if __name__ == "__main__":
+
+    app.run(debug=True)
